@@ -7,29 +7,65 @@ description: 直接操作 Windows 桌面——截屏、找窗口、点击、输�
 
 用户让你"看屏幕""点这里""在那个窗口输入"时用这个。**自己截，别要用户截图。**
 
-## 工具位置
+## 先选路线，别上来就截图
 
-```
-%USERPROFILE%\.dsh\tools\ctl.cmd
-```
+按优先级挑，**越靠前越准越省**：
 
-包装器 `ctl.cmd` + 实际逻辑 `dsh-ctl.ps1`，两者放在同一目录。用 `pwsh` 调用，PowerShell 风格参数：
+| 目标是什么 | 用什么 | 为什么 |
+|---|---|---|
+| **网页**（Edge/Chrome） | `browser-automation`（CDP） | 按 DOM 文字定位，坐标由浏览器算，永不点偏 |
+| **原生 Windows 程序** | **本技能 · `tree` 动作** | UIA 提供精确控件坐标 |
+| **游戏/Canvas/自绘界面** | `screen-ocr` | 没有 UIA 也没有 DOM，只剩像素 |
+
+**动手前的黄金动作**：先跑一次 `tree`。能出控件就赢了，别去看截图。
+
+## `find`：一步拿到坐标（UIA + OCR 自动互补）
 
 ```powershell
-$c = "$env:USERPROFILE\.dsh\tools\ctl.cmd"
+& $c -Action find -Text "登录"
+# 输出: 929,62  <DIV>  36x36  "登录"
+#         source: UIA (exact)
+```
+
+它先查 UIA（精确、免费），查不到才降级到 OCR。**这是最省事的入口。**
+
+限定到某个窗口更稳（避免匹配到别处的同名文字）：
+
+```powershell
+& $c -Action find -ProcId 1234 -Text "登录"
+```
+
+## 工具位置
+
+脚本就在本技能目录内，**自包含、可整体搬走**：
+
+```
+<本技能目录>\
+├── SKILL.md
+└── scripts\
+    ├── ctl.cmd          入口（绕过执行策略）
+    └── dsh-ctl.ps1      实际逻辑
+```
+
+技能加载时会告诉我 `Base directory`，据此拼出绝对路径：
+
+```powershell
+$c = Join-Path "<base-directory>" "scripts\ctl.cmd"
 & $c -Action windows
 ```
 
-**只调 `.cmd`，不要直接跑 `.ps1`**（会被执行策略拦截：`AuthorizationManager 检查失败`）。
+`dsh-ctl.ps1` 内部用 `$MyInvocation.MyCommand.Path` 自解析，OCR 依赖会去兄弟目录
+`screen-ocr\scripts\ocr.py` 找，**没有任何写死的用户路径**。
 
-> 首次使用前确认工具存在：`Test-Path "$env:USERPROFILE\.dsh\tools\ctl.cmd"`。
-> 这是本机专用工具，不在本仓库内——仓库只放技能说明，不含可执行脚本。
+**只调 `.cmd`，不要直接跑 `.ps1`**（会被执行策略拦截：`AuthorizationManager 检查失败`）。
 
 ## 动作表
 
 | 目的 | 命令 |
 |---|---|
 | 列出可见窗口（pid/标题/坐标/是否前台） | `& $c -Action windows` |
+| **按文字找坐标** | `& $c -Action find -Text "确定"` |
+| **屏幕所有文字+坐标** | `& $c -Action ocr` |
 | 全屏截图 | `& $c -Action shot -Out E:\path\shot.png` |
 | 截单窗口 | `& $c -Action shot -ProcId 1234 -Out ...` |
 | 截屏幕区域 | `& $c -Action shot -X 100 -Y 200 -W 800 -H 600 -Out ...` |
@@ -101,3 +137,25 @@ Chromium（Edge/QQ）走 D3D 合成，`BitBlt` 截窗口得到 5 KB 的纯黑图
 
 主屏 2560×1440 从 (0,0) 开始；副屏从 x=2560 开始且 **y 为负（-67）**。
 截图前先 `cursor` 确认虚拟屏幕范围。
+
+### 8. 全桌面搜索会匹配到"你自己说的话"
+
+搜任意词，UIA 都会命中 **DSH 聊天窗口里我自己的输出**——因为整段对话都在那个窗口里。
+一次搜「番剧」返回 10 个匹配，其中 6 个是我之前写的分析文字。
+
+**必须用 `-ProcId` / `-Title` 限定目标窗口。**
+
+### 9. UIA 会报屏幕外的坐标
+
+实测遇到 `y = -969`——那个元素在副屏之外或已不可见。
+`find` 现在会**过滤掉虚拟屏幕范围外的命中**：
+
+```powershell
+$vs = [System.Windows.Forms.SystemInformation]::VirtualScreen
+# 丢弃 cx/cy 超出 [Left, Left+Width] × [Top, Top+Height] 的结果
+```
+
+### 10. PowerShell 传中文给 Python 会乱码
+
+`find` 的 OCR 兜底走 base64 传递（`find-b64`），否则 `番剧` 到 Python 那边变成乱码。
+自己直接调 `ocr.py` 时也要用 `find-b64`。
